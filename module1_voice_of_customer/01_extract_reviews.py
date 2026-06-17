@@ -1,23 +1,12 @@
 """
-Smart Data Extractor - automatically chooses the right data source:
-
-  1. APP_STORE_ID set in config.py → scrapes Apple App Store (iTunes RSS)
-  2. APP_STORE_ID empty           → scrapes Google Reviews via SerpAPI
-
-No scraping blocks. Works perfectly from GitHub Actions.
-
-Usage (local):
-    python module1_voice_of_customer/01_extract_reviews.py
+Smart Data Extractor:
+  1. APP_STORE_ID set → Apple App Store (iTunes RSS)
+  2. APP_STORE_ID empty → Google Reviews via SerpAPI
 """
 
-import os
-import sys
-import csv
-import json
-import time
-import urllib.request
-import urllib.parse
-import urllib.error
+import os, sys, csv, json, time, re
+import urllib.request, urllib.parse, urllib.error
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
@@ -26,18 +15,12 @@ from config import (
 )
 
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
-
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                   "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"),
     "Accept-Language": "en-US,en;q=0.9",
 }
-
-FIELDNAMES = ["review_id", "stars", "date", "title", "text",
-              "source", "product", "version", "vote_count"]
+FIELDNAMES = ["review_id","stars","date","title","text","source","product","version","vote_count"]
 
 
 def fetch_url(url, timeout=20):
@@ -46,14 +29,31 @@ def fetch_url(url, timeout=20):
         return r.read().decode("utf-8")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SOURCE 1 - Apple App Store (iTunes RSS)
-# ══════════════════════════════════════════════════════════════════════════════
+def parse_relative_date(text):
+    """Convert 'a month ago', '2 years ago' etc to YYYY-MM-DD."""
+    if not text:
+        return datetime.now().strftime("%Y-%m-%d")
+    text = text.lower().strip()
+    now  = datetime.now()
+    try:
+        if "just now" in text or "moment" in text:
+            return now.strftime("%Y-%m-%d")
+        num = re.search(r'\d+', text)
+        n   = int(num.group()) if num else 1
+        if "year"  in text: return (now - timedelta(days=n*365)).strftime("%Y-%m-%d")
+        if "month" in text: return (now - timedelta(days=n*30)).strftime("%Y-%m-%d")
+        if "week"  in text: return (now - timedelta(days=n*7)).strftime("%Y-%m-%d")
+        if "day"   in text: return (now - timedelta(days=n)).strftime("%Y-%m-%d")
+        if "hour"  in text or "minute" in text: return now.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return now.strftime("%Y-%m-%d")
 
+
+# ── App Store ─────────────────────────────────────────────────────────────────
 def scrape_app_store():
     print(f"\n📱 Scraping Apple App Store (ID: {APP_STORE_ID})...")
     reviews = []
-
     for page in range(1, MAX_REVIEW_PAGES + 1):
         url = (f"https://itunes.apple.com/{APP_COUNTRY}/rss/customerreviews"
                f"/page={page}/id={APP_STORE_ID}/sortby=mostrecent/json")
@@ -63,213 +63,112 @@ def scrape_app_store():
             if page == 1 and entries:
                 entries = entries[1:]
             if not entries:
-                print(f"   Page {page}: no more reviews.")
                 break
             for e in entries:
                 reviews.append({
-                    "review_id":  e.get("id", {}).get("label", ""),
-                    "stars":      e.get("im:rating", {}).get("label", ""),
-                    "date":       e.get("updated", {}).get("label", "")[:10],
-                    "title":      e.get("title", {}).get("label", ""),
-                    "text":       e.get("content", {}).get("label", "").replace("\n", " ").strip(),
+                    "review_id":  e.get("id",{}).get("label",""),
+                    "stars":      e.get("im:rating",{}).get("label",""),
+                    "date":       e.get("updated",{}).get("label","")[:10],
+                    "title":      e.get("title",{}).get("label",""),
+                    "text":       e.get("content",{}).get("label","").replace("\n"," ").strip(),
                     "source":     "app_store",
                     "product":    BRAND_NAME,
-                    "version":    e.get("im:version", {}).get("label", ""),
-                    "vote_count": e.get("im:voteCount", {}).get("label", "0"),
+                    "version":    e.get("im:version",{}).get("label",""),
+                    "vote_count": e.get("im:voteCount",{}).get("label","0"),
                 })
             print(f"   Page {page}: {len(entries)} reviews (total: {len(reviews)})")
             time.sleep(0.5)
-        except urllib.error.HTTPError as ex:
-            print(f"   Page {page}: HTTP {ex.code} - stopping.")
-            break
         except Exception as ex:
             print(f"   Page {page}: {ex} - stopping.")
             break
-
     print(f"   ✅ App Store: {len(reviews)} reviews")
     return reviews
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SOURCE 2 - Google Reviews via SerpAPI
-# ══════════════════════════════════════════════════════════════════════════════
+# ── SerpAPI Google Reviews ────────────────────────────────────────────────────
+def serpapi_get(params):
+    params["api_key"] = SERPAPI_KEY
+    url = f"https://serpapi.com/search?{urllib.parse.urlencode(params)}"
+    return json.loads(fetch_url(url))
 
-def search_google_place(keyword):
-    """Search for a business on Google and return its place data_id."""
-    params = urllib.parse.urlencode({
-        "engine":  "google_maps",
-        "q":       keyword,
-        "api_key": SERPAPI_KEY,
-        "type":    "search",
-    })
-    url = f"https://serpapi.com/search?{params}"
+
+def scrape_google_maps_reviews(keyword):
+    """Get Google Maps reviews for a business matching keyword."""
+    reviews = []
     try:
-        data    = json.loads(fetch_url(url))
+        data    = serpapi_get({"engine":"google_maps","q":keyword,"type":"search"})
         results = data.get("local_results", [])
-        if results:
-            place = results[0]
-            print(f"   Found: {place.get('title','?')} - rating: {place.get('rating','?')} ({place.get('reviews','?')} reviews)")
-            return place.get("data_id", ""), place.get("title", keyword), place.get("rating", "")
-    except Exception as ex:
-        print(f"   Google Maps search failed: {ex}")
-    return "", keyword, ""
+        if not results:
+            print(f"   No Maps results for '{keyword}'")
+            return []
+        place    = results[0]
+        data_id  = place.get("data_id","")
+        name     = place.get("title", keyword)
+        rating   = place.get("rating","")
+        n_reviews= place.get("reviews","")
+        print(f"   Found: {name} - {rating}⭐ ({n_reviews} reviews)")
+        if not data_id:
+            return []
 
-
-def scrape_google_reviews(data_id, place_name, max_pages=5):
-    """Scrape Google reviews for a place using its data_id."""
-    reviews  = []
-    next_token = None
-
-    for page in range(max_pages):
-        params = {
-            "engine":      "google_maps_reviews",
-            "data_id":     data_id,
-            "api_key":     SERPAPI_KEY,
-            "sort_by":     "newestFirst",
-            "hl":          "en",
-        }
-        if next_token:
-            params["next_page_token"] = next_token
-
-        url = f"https://serpapi.com/search?{urllib.parse.urlencode(params)}"
-        try:
-            data         = json.loads(fetch_url(url))
-            raw_reviews  = data.get("reviews", [])
-
-            if not raw_reviews:
-                print(f"   Page {page+1}: no more reviews.")
+        next_token = None
+        for page in range(3):
+            params = {"engine":"google_maps_reviews","data_id":data_id,"sort_by":"newestFirst","hl":"en"}
+            if next_token:
+                params["next_page_token"] = next_token
+            rdata = serpapi_get(params)
+            raw   = rdata.get("reviews", [])
+            if not raw:
                 break
-
-            for r in raw_reviews:
+            for r in raw:
+                text = r.get("snippet","").replace("\n"," ").strip()
+                if not text:
+                    continue
                 reviews.append({
-                    "review_id":  r.get("review_id", f"{data_id}_{page}_{len(reviews)}"),
-                    "stars":      str(r.get("rating", "")),
-                    "date":       r.get("date", ""),
+                    "review_id":  r.get("review_id", f"{data_id}_{len(reviews)}"),
+                    "stars":      str(r.get("rating","")),
+                    "date":       parse_relative_date(r.get("date","")),
                     "title":      "",
-                    "text":       r.get("snippet", "").replace("\n", " ").strip(),
-                    "source":     "google_reviews",
-                    "product":    place_name,
+                    "text":       text,
+                    "source":     "google_maps",
+                    "product":    name,
                     "version":    "",
-                    "vote_count": str(r.get("likes", 0)),
+                    "vote_count": str(r.get("likes",0)),
                 })
-
-            print(f"   Page {page+1}: {len(raw_reviews)} reviews (total: {len(reviews)})")
-            next_token = data.get("serpapi_pagination", {}).get("next_page_token", "")
+            print(f"   Page {page+1}: {len(raw)} reviews (total: {len(reviews)})")
+            next_token = rdata.get("serpapi_pagination",{}).get("next_page_token","")
             if not next_token:
                 break
-            time.sleep(0.5)
-
-        except Exception as ex:
-            print(f"   Page {page+1} error: {ex}")
-            break
-
-    return reviews
-
-
-def scrape_google_shopping_reviews(keyword):
-    """Scrape Google Shopping product reviews for a brand keyword."""
-    reviews = []
-
-    # First find products
-    params = urllib.parse.urlencode({
-        "engine":  "google_shopping",
-        "q":       keyword,
-        "api_key": SERPAPI_KEY,
-        "num":     "10",
-    })
-    url = f"https://serpapi.com/search?{urllib.parse.urlencode({'engine':'google_shopping','q':keyword,'api_key':SERPAPI_KEY})}"
-
-    try:
-        data     = json.loads(fetch_url(url))
-        products = data.get("shopping_results", [])[:5]
-        print(f"   Found {len(products)} products on Google Shopping")
-
-        for product in products:
-            product_id    = product.get("product_id", "")
-            product_title = product.get("title", keyword)
-
-            if not product_id:
-                continue
-
-            # Get reviews for this product
-            rev_params = urllib.parse.urlencode({
-                "engine":     "google_product",
-                "product_id": product_id,
-                "api_key":    SERPAPI_KEY,
-            })
-            rev_url = f"https://serpapi.com/search?{rev_params}"
-
-            try:
-                rev_data    = json.loads(fetch_url(rev_url))
-                raw_reviews = rev_data.get("reviews", [])
-
-                for r in raw_reviews:
-                    text = r.get("content", "").strip()
-                    if not text:
-                        continue
-                    reviews.append({
-                        "review_id":  r.get("id", f"{product_id}_{len(reviews)}"),
-                        "stars":      str(r.get("rating", "")),
-                        "date":       r.get("date", ""),
-                        "title":      r.get("title", ""),
-                        "text":       text.replace("\n", " "),
-                        "source":     "google_shopping",
-                        "product":    product_title,
-                        "version":    "",
-                        "vote_count": "0",
-                    })
-
-                print(f"   {product_title[:40]}: {len(raw_reviews)} reviews")
-                time.sleep(0.3)
-
-            except Exception as ex:
-                print(f"   Product reviews error: {ex}")
-
+            time.sleep(0.4)
     except Exception as ex:
-        print(f"   Google Shopping search failed: {ex}")
-
+        print(f"   Maps error for '{keyword}': {ex}")
     return reviews
 
 
 def scrape_serpapi():
-    """Main SerpAPI scraper - tries Google Maps then Google Shopping."""
     if not SERPAPI_KEY:
-        print("   ❌ SERPAPI_KEY not set. Add it to GitHub Secrets and Streamlit Secrets.")
+        print("   ❌ SERPAPI_KEY not set in environment.")
         return []
 
     print(f"\n🔍 Scraping Google Reviews via SerpAPI for: {BRAND_NAME}...")
     all_reviews = []
+    seen_ids    = set()
 
-    # Try each keyword
-    seen_place_ids = set()
-    for keyword in KEYWORDS[:3]:
-        print(f"\n   Searching: '{keyword}'")
-
-        # Google Maps reviews (for physical stores)
-        data_id, place_name, _ = search_google_place(keyword)
-        if data_id and data_id not in seen_place_ids:
-            seen_place_ids.add(data_id)
-            reviews = scrape_google_reviews(data_id, place_name, max_pages=3)
-            all_reviews.extend(reviews)
-            time.sleep(0.5)
-
-        # Google Shopping reviews (for products)
-        shopping_reviews = scrape_google_shopping_reviews(keyword)
-        all_reviews.extend(shopping_reviews)
+    for keyword in KEYWORDS[:4]:
+        print(f"\n   Keyword: '{keyword}'")
+        reviews = scrape_google_maps_reviews(keyword)
+        for r in reviews:
+            if r["review_id"] not in seen_ids:
+                seen_ids.add(r["review_id"])
+                all_reviews.append(r)
         time.sleep(0.5)
-
-        # Stop if we have enough
         if len(all_reviews) >= 300:
             break
 
-    print(f"\n   ✅ SerpAPI: {len(all_reviews)} total reviews collected")
+    print(f"\n   ✅ SerpAPI: {len(all_reviews)} unique reviews")
     return all_reviews
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN
-# ══════════════════════════════════════════════════════════════════════════════
-
+# ── Save & Main ───────────────────────────────────────────────────────────────
 def save_reviews(reviews):
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(REVIEWS_CSV, "w", newline="", encoding="utf-8") as f:
@@ -284,34 +183,29 @@ def main():
     print(f"  Smart Data Extractor - {BRAND_NAME}")
     print("=" * 55)
 
-    all_reviews = []
-
     if APP_STORE_ID.strip():
-        print("\n🔍 App Store ID found → using App Store mode")
-        all_reviews = scrape_app_store()
+        print("\n🔍 App Store ID found → App Store mode")
+        reviews = scrape_app_store()
     else:
-        print("\n🔍 No App Store ID → using SerpAPI (Google Reviews) mode")
-        all_reviews = scrape_serpapi()
+        print("\n🔍 No App Store ID → SerpAPI mode")
+        reviews = scrape_serpapi()
 
-    if not all_reviews:
+    if not reviews:
         print("\n⚠️  No reviews collected.")
-        print("   Check: SERPAPI_KEY is set in GitHub Secrets")
-        print("   Check: KEYWORDS in config.py match real business names")
+        print("   Check SERPAPI_KEY is in GitHub Secrets")
         sys.exit(1)
 
-    save_reviews(all_reviews)
+    save_reviews(reviews)
 
-    # Summary
     sources = {}
-    for r in all_reviews:
-        src = r.get("source", "unknown")
-        sources[src] = sources.get(src, 0) + 1
+    for r in reviews:
+        src = r.get("source","unknown")
+        sources[src] = sources.get(src,0) + 1
 
     print("\n" + "=" * 55)
-    print(f"  ✅ Done - {len(all_reviews)} total reviews")
+    print(f"  ✅ Done - {len(reviews)} total reviews")
     for src, count in sources.items():
         print(f"     {src}: {count}")
-    print("  Run: streamlit run main_app.py")
     print("=" * 55)
 
 
