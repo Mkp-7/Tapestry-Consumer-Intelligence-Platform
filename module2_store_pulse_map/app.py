@@ -1,5 +1,5 @@
 """
-Module 2 - Version & Time Intelligence
+Module 2 — Version & Time Intelligence
 (Replaces geo map since App Store reviews have no location data)
 Shows rating trends by app version, time period, and sentiment distribution.
 """
@@ -28,7 +28,7 @@ def load_data():
 
 def show():
     st.markdown("## 📊 Version & Trend Intelligence")
-    st.markdown(f"How **{APP_NAME}** ratings evolve across app versions and time - spot which release hurt or helped.")
+    st.markdown(f"How **{APP_NAME}** ratings evolve across app versions and time — spot which release hurt or helped.")
 
     df = load_data()
     if df is None or df.empty:
@@ -40,7 +40,7 @@ def show():
     avg        = df["stars"].mean()
     pct_neg    = (df["stars"] <= 2).mean() * 100
     pct_pos    = (df["stars"] >= 4).mean() * 100
-    versions   = df["version"].nunique() if "version" in df.columns else "-"
+    versions   = df["version"].nunique() if "version" in df.columns else "—"
 
     # Recent trend (last 30 days vs prior 30 days)
     try:
@@ -92,55 +92,75 @@ def show():
                           legend=dict(orientation="h"))
         st.plotly_chart(fig, use_container_width=True, config={"scrollZoom":True})
 
-    # ── Version analysis ──────────────────────────────────────────────────────
-    if "version" in df.columns:
-        st.markdown("---")
-        st.markdown("### 📱 Rating by App Version")
-        st.caption("Which release caused a spike in negative reviews?")
+    # ── Product / Location breakdown ─────────────────────────────────────────
+    st.markdown("---")
 
-        va = (df.groupby("version")["stars"]
+    # Show version breakdown if App Store data, otherwise show product/location
+    group_col = None
+    group_label = ""
+    if "version" in df.columns and df["version"].notna().any() and df["version"].nunique() > 1:
+        group_col   = "version"
+        group_label = "App Version"
+    elif "product" in df.columns and df["product"].notna().any() and df["product"].nunique() > 1:
+        group_col   = "product"
+        group_label = "Location / Product"
+
+    if group_col:
+        st.markdown(f"### 📊 Rating by {group_label}")
+        va = (df.groupby(group_col)["stars"]
               .agg(avg_rating="mean", review_count="count")
               .reset_index())
-        va = va[va["review_count"] >= 3].copy()
+        va = va[va["review_count"] >= 1].copy()
         va["avg_rating"] = va["avg_rating"].round(2)
         va = va.sort_values("avg_rating")
 
         fig2 = px.bar(
-            va, x="avg_rating", y="version",
+            va, x="avg_rating", y=group_col,
             orientation="h",
             color="avg_rating",
             color_continuous_scale=["#E24B4A","#EF9F27","#1D9E75"],
             range_color=[1,5],
             text="avg_rating",
             hover_data={"review_count":True},
-            labels={"avg_rating":"Avg Rating","version":"Version","review_count":"Reviews"},
+            labels={"avg_rating":"Avg Rating", group_col: group_label, "review_count":"Reviews"},
         )
         fig2.update_traces(texttemplate="%{text:.2f}", textposition="outside")
         fig2.update_layout(
-            height=max(300, len(va)*30),
-            margin=dict(l=0,r=0,t=10,b=0),
+            height=max(300, len(va)*35),
+            margin=dict(l=0,r=80,t=10,b=0),
             plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             coloraxis_showscale=False, yaxis_title="",
         )
         st.plotly_chart(fig2, use_container_width=True)
 
-        # Worst versions table
-        worst = va.nsmallest(5,"avg_rating")[["version","avg_rating","review_count"]]
-        best  = va.nlargest(5,"avg_rating")[["version","avg_rating","review_count"]]
+        worst = va.nsmallest(5,"avg_rating")[[group_col,"avg_rating","review_count"]]
+        best  = va.nlargest(5,"avg_rating")[[group_col,"avg_rating","review_count"]]
 
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**🔴 Lowest Rated Versions**")
+            st.markdown(f"**🔴 Lowest Rated {group_label}s**")
             st.dataframe(worst, column_config={
-                "avg_rating":    st.column_config.NumberColumn("Avg Rating ⭐", format="%.2f"),
-                "review_count":  st.column_config.NumberColumn("Reviews"),
+                "avg_rating":   st.column_config.NumberColumn("Avg Rating ⭐", format="%.2f"),
+                "review_count": st.column_config.NumberColumn("Reviews"),
             }, use_container_width=True, hide_index=True)
         with col2:
-            st.markdown("**🟢 Highest Rated Versions**")
+            st.markdown(f"**🟢 Highest Rated {group_label}s**")
             st.dataframe(best, column_config={
-                "avg_rating":    st.column_config.NumberColumn("Avg Rating ⭐", format="%.2f"),
-                "review_count":  st.column_config.NumberColumn("Reviews"),
+                "avg_rating":   st.column_config.NumberColumn("Avg Rating ⭐", format="%.2f"),
+                "review_count": st.column_config.NumberColumn("Reviews"),
             }, use_container_width=True, hide_index=True)
+    else:
+        st.markdown("### 📊 Rating Distribution")
+        rc = df["stars"].dropna().value_counts().sort_index().reset_index()
+        rc.columns = ["Stars","Count"]
+        rc["Stars"] = rc["Stars"].astype(int).astype(str) + " ⭐"
+        fig2 = px.bar(rc, x="Stars", y="Count",
+                      color="Count",
+                      color_continuous_scale=["#E24B4A","#EF9F27","#1D9E75"])
+        fig2.update_layout(height=300, margin=dict(l=0,r=0,t=10,b=0),
+                           plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                           coloraxis_showscale=False)
+        st.plotly_chart(fig2, use_container_width=True)
 
     # ── Sentiment over time heatmap ───────────────────────────────────────────
     if "date" in df.columns and not df["date"].isna().all():
